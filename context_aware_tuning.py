@@ -620,7 +620,7 @@ class ContextAwareFinetuner:
         
         best_val_acc = 0.0
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='max', factor=0.5, patience=2, verbose=True
+            self.optimizer, mode='max', factor=0.5, patience=2
         )
         
         for epoch in range(epochs):
@@ -683,7 +683,7 @@ def main():
     best_score = finetuner.fine_tune(
         data_files=available_files,
         epochs=3,
-        batch_size=200
+        batch_size=1024
     )
     
     print(f"Best accuracy: {best_score:.4f}")

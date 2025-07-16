@@ -399,8 +399,11 @@ class VietnameseAccentRestorer:
         
         return corrected_text
     
-    def predict_multiple(self, text, num_suggestions=3, temperature=0.7):
-        """Dự đoán và trả về nhiều gợi ý cho text có dấu từ text không dấu"""
+    def predict_multiple(self, text, num_suggestions=3, beam_width=None):
+        """Dự đoán và trả về nhiều gợi ý cho text có dấu từ text không dấu sử dụng Beam Search"""
+        if beam_width is None:
+            beam_width = max(num_suggestions * 2, 5)  # Beam width lớn hơn số suggestions cần
+            
         self.model.eval()
         
         # Encode input
@@ -413,116 +416,86 @@ class VietnameseAccentRestorer:
         
         with torch.no_grad():
             logits = self.model(input_tensor)  # (batch_size, seq_len, vocab_size)
+            
+        # Chuyển logits về log probabilities để tính toán dễ dàng hơn
+        log_probs = torch.log_softmax(logits, dim=-1).squeeze(0)  # (seq_len, vocab_size)
         
+        # Beam Search implementation
+        sequences = self._beam_search(log_probs, beam_width, num_suggestions)
+        
+        # Convert sequences to text và post-process
         suggestions = []
-        
-        # Suggestion đầu tiên: greedy (tốt nhất)
-        predictions = torch.argmax(logits, dim=-1)
-        predicted_indices = predictions.squeeze().tolist()
-        predicted_text = self.decode_text(predicted_indices)
-        corrected_text = self.preserve_non_alphabetic(text, predicted_text)
-        suggestions.append(corrected_text)
-        
-        # Thử tạo thêm gợi ý bằng beam search với ngưỡng confidence cao
-        for suggestion_idx in range(1, num_suggestions):
-            # Sử dụng sampling với temperature thấp để có gợi ý có nghĩa
-            predicted_indices = []
-            
-            for pos in range(logits.size(1)):
-                char_logits = logits[0, pos, :] / temperature
-                char_probs = torch.softmax(char_logits, dim=0)
-                
-                # Chỉ xem xét top-3 candidates có confidence cao
-                top_probs, top_indices = torch.topk(char_probs, k=3)
-                
-                # Kiểm tra nếu có candidate thứ 2 với confidence đủ cao (>10% của top-1)
-                if len(top_probs) > suggestion_idx and top_probs[suggestion_idx] > top_probs[0] * 0.1:
-                    predicted_char_idx = top_indices[suggestion_idx].item()
-                else:
-                    # Không có alternative có confidence đủ cao, dùng greedy
-                    predicted_char_idx = top_indices[0].item()
-                
-                predicted_indices.append(predicted_char_idx)
-            
-            # Decode và post-process
-            predicted_text = self.decode_text(predicted_indices)
+        for sequence, score in sequences:
+            predicted_text = self.decode_text(sequence)
             corrected_text = self.preserve_non_alphabetic(text, predicted_text)
             
-            # Chỉ thêm nếu khác biệt có nghĩa và không duplicate
-            if (corrected_text != suggestions[0] and 
-                corrected_text not in suggestions and
-                self._has_meaningful_difference(corrected_text, suggestions[0])):
+            # Chỉ thêm nếu không duplicate và có nghĩa
+            if (corrected_text not in suggestions and 
+                len(corrected_text.strip()) > 0):
                 suggestions.append(corrected_text)
-            else:
-                # Không tìm được gợi ý có nghĩa khác, dừng lại
+                
+            if len(suggestions) >= num_suggestions:
                 break
         
-        # Nếu chỉ có 1 gợi ý duy nhất có nghĩa, trả về nó
+        # Đảm bảo luôn có ít nhất 1 suggestion (greedy fallback)
+        if not suggestions:
+            predictions = torch.argmax(logits, dim=-1)
+            predicted_indices = predictions.squeeze().tolist()
+            predicted_text = self.decode_text(predicted_indices)
+            corrected_text = self.preserve_non_alphabetic(text, predicted_text)
+            suggestions.append(corrected_text)
+        
         return suggestions
     
-    def _has_meaningful_difference(self, text1, text2):
-        """Kiểm tra xem 2 text có sự khác biệt có nghĩa không"""
-        if len(text1) != len(text2):
-            return False
+    def _beam_search(self, log_probs, beam_width, num_suggestions):
+        """
+        Implement Beam Search algorithm với tối ưu hóa performance
         
-        # Đếm số ký tự khác biệt
-        diff_count = sum(1 for c1, c2 in zip(text1, text2) if c1 != c2)
-        
-        # Chỉ chấp nhận nếu có ít nhất 1 nhưng không quá 3 ký tự khác biệt
-        if diff_count < 1 or diff_count > 3:
-            return False
-        
-        # Kiểm tra xem những ký tự khác biệt có phải là variants hợp lý không
-        for i, (c1, c2) in enumerate(zip(text1, text2)):
-            if c1 != c2:
-                if not self._is_valid_variant(c1, c2):
-                    return False
-        
-        return True
-    
-    def _is_valid_variant(self, original_char, candidate_char):
-        """Kiểm tra xem candidate_char có phải là variant hợp lý của original_char không"""
-        if not candidate_char:
-            return False
+        Args:
+            log_probs: (seq_len, vocab_size) - log probabilities for each position
+            beam_width: number of beams to keep at each step
+            num_suggestions: number of final suggestions needed
             
-        original_lower = original_char.lower()
-        candidate_lower = candidate_char.lower()
+        Returns:
+            List of (sequence, score) tuples sorted by score descending
+        """
+        seq_len, vocab_size = log_probs.shape
         
-        # Mapping các ký tự cơ bản với các variant có dấu
-        variant_groups = {
-            'a': ['a', 'ă', 'â', 'á', 'à', 'ả', 'ã', 'ạ', 'ắ', 'ằ', 'ẳ', 'ẵ', 'ặ', 'ấ', 'ầ', 'ẩ', 'ẫ', 'ậ'],
-            'e': ['e', 'ê', 'é', 'è', 'ẻ', 'ẽ', 'ẹ', 'ế', 'ề', 'ể', 'ễ', 'ệ'],
-            'i': ['i', 'í', 'ì', 'ỉ', 'ĩ', 'ị'],
-            'o': ['o', 'ô', 'ơ', 'ó', 'ò', 'ỏ', 'õ', 'ọ', 'ố', 'ồ', 'ổ', 'ỗ', 'ộ', 'ớ', 'ờ', 'ở', 'ỡ', 'ợ'],
-            'u': ['u', 'ư', 'ú', 'ù', 'ủ', 'ũ', 'ụ', 'ứ', 'ừ', 'ử', 'ữ', 'ự'],
-            'y': ['y', 'ý', 'ỳ', 'ỷ', 'ỹ', 'ỵ'],
-            'd': ['d', 'đ']
-        }
+        # Initialize beams: (sequence, log_prob_sum)
+        beams = [([], 0.0)]
         
-        # Tìm group của original character
-        for base_char, variants in variant_groups.items():
-            if original_lower in variants:
-                return candidate_lower in variants
+        for pos in range(seq_len):
+            new_beams = []
+            
+            for sequence, current_score in beams:
+                # Get probabilities for current position
+                pos_log_probs = log_probs[pos]  # (vocab_size,)
+                
+                # Tối ưu: chỉ xem xét top-k characters thay vì toàn bộ vocabulary
+                # Điều này giảm complexity từ O(beam_width * vocab_size) xuống O(beam_width * k)
+                top_k = min(50, vocab_size)  # Chỉ xem xét top 50 characters có xác suất cao nhất
+                top_values, top_indices = torch.topk(pos_log_probs, k=top_k)
+                
+                for i, char_idx in enumerate(top_indices):
+                    new_sequence = sequence + [char_idx.item()]
+                    new_score = current_score + top_values[i].item()
+                    new_beams.append((new_sequence, new_score))
+            
+            # Keep only top beam_width beams
+            new_beams.sort(key=lambda x: x[1], reverse=True)  # Sort by score descending
+            beams = new_beams[:beam_width]
         
-        # Nếu không phải ký tự có thể có dấu, chỉ chấp nhận chính nó
-        return original_lower == candidate_lower
-    
-    def _is_reasonable_text(self, output_text, input_text):
-        """Kiểm tra xem output text có hợp lý không"""
-        # Kiểm tra độ dài
-        if len(output_text) != len(input_text):
-            return False
+        # Return top sequences, normalized by length to avoid bias toward shorter sequences
+        final_beams = []
+        for sequence, score in beams:
+            # Normalization để tránh bias về độ dài
+            normalized_score = score / len(sequence) if len(sequence) > 0 else score
+            final_beams.append((sequence, normalized_score))
         
-        # Kiểm tra tỷ lệ ký tự hợp lệ
-        valid_chars = 0
-        for char in output_text:
-            if char.isalpha() or char.isspace() or char in ".,!?;:-()[]{}\"'/":
-                valid_chars += 1
-        
-        valid_ratio = valid_chars / len(output_text) if len(output_text) > 0 else 0
-        
-        # Ít nhất 80% ký tự phải hợp lệ
-        return valid_ratio >= 0.8
+        # Sort by normalized score and return top suggestions
+        final_beams.sort(key=lambda x: x[1], reverse=True)
+        return final_beams[:num_suggestions * 2]  # Return more than needed for filtering
+
     
     def preserve_non_alphabetic(self, original, predicted):
         """
