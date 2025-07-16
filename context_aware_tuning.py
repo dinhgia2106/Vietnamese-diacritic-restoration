@@ -453,11 +453,30 @@ class ContextAwareFinetuner:
     """Context-aware fine-tuner for accent restoration models"""
     
     def __init__(self, model_path, device='cuda' if torch.cuda.is_available() else 'cpu',
-                 ranking_weight=0.3, ranking_margin=1.0, use_enhanced_model=False):
+                 ranking_weight=0.3, ranking_margin=1.0, use_enhanced_model=False, 
+                 use_linguistic_negatives=True):
         self.device = device
+        self.use_linguistic_negatives = use_linguistic_negatives
         
         self.restorer = VietnameseAccentRestorer(model_path, use_enhanced_model=use_enhanced_model)
         self.restorer.model.to(self.device)
+        
+        # Vietnamese accent groups for generating realistic negative samples
+        self.accent_groups = {
+            'a': ['a', 'á', 'à', 'ả', 'ã', 'ạ'],
+            'ă': ['ă', 'ắ', 'ằ', 'ẳ', 'ẵ', 'ặ'],
+            'â': ['â', 'ấ', 'ầ', 'ẩ', 'ẫ', 'ậ'],
+            'e': ['e', 'é', 'è', 'ẻ', 'ẽ', 'ẹ'],
+            'ê': ['ê', 'ế', 'ề', 'ể', 'ễ', 'ệ'],
+            'i': ['i', 'í', 'ì', 'ỉ', 'ĩ', 'ị'],
+            'o': ['o', 'ó', 'ò', 'ỏ', 'õ', 'ọ'],
+            'ô': ['ô', 'ố', 'ồ', 'ổ', 'ỗ', 'ộ'],
+            'ơ': ['ơ', 'ớ', 'ờ', 'ở', 'ỡ', 'ợ'],
+            'u': ['u', 'ú', 'ù', 'ủ', 'ũ', 'ụ'],
+            'ư': ['ư', 'ứ', 'ừ', 'ử', 'ữ', 'ự'],
+            'y': ['y', 'ý', 'ỳ', 'ỷ', 'ỹ', 'ỵ'],
+            'd': ['d', 'đ']
+        }
         
         self.optimizer = optim.AdamW(
             self.restorer.model.parameters(),
@@ -522,28 +541,113 @@ class ContextAwareFinetuner:
         }
     
     def _calculate_ranking_loss(self, outputs, target_ids, lengths):
-        """Calculate ranking loss using pairwise comparison"""
-        # Calculate log probabilities
+        """
+        Calculate ranking loss using hard negative mining with beam search.
+        This creates more meaningful negative samples that are coherent sequences
+        rather than character-by-character second choices.
+        """
         log_probs = F.log_softmax(outputs, dim=-1)
+        batch_size = outputs.size(0)
         
-        # Get log-prob of target sequence
-        target_log_probs = torch.gather(log_probs, 2, target_ids.unsqueeze(2)).squeeze(2)
+        target_scores = []
+        negative_scores = []
         
-        # Create negative samples (second-best predictions)
-        second_best_ids = torch.topk(outputs, 2, dim=-1)[1][:, :, 1]
-        negative_log_probs = torch.gather(log_probs, 2, second_best_ids.unsqueeze(2)).squeeze(2)
+        for i in range(batch_size):
+            seq_length = lengths[i].item() if hasattr(lengths[i], 'item') else int(lengths[i])
+            sample_log_probs = log_probs[i, :seq_length, :]
+            target_seq = target_ids[i, :seq_length]
+            
+            # Calculate target sequence score
+            target_log_prob_seq = torch.gather(
+                sample_log_probs, 1, target_seq.unsqueeze(1)
+            ).squeeze(1)
+            target_score = target_log_prob_seq.sum()
+            target_scores.append(target_score)
+            
+            # Generate hard negative using beam search
+            negative_score = self._generate_hard_negative(sample_log_probs, target_seq)
+            negative_scores.append(negative_score)
         
-        # Create mask to ignore padding
-        mask = (target_ids != 0).float()
+        target_scores = torch.stack(target_scores)
+        negative_scores = torch.stack(negative_scores)
         
-        # Calculate sequence-level scores
-        target_scores = (target_log_probs * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        negative_scores = (negative_log_probs * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+        # Normalize by sequence length for fair comparison
+        seq_lengths = torch.tensor([lengths[i].item() if hasattr(lengths[i], 'item') else int(lengths[i]) 
+                                   for i in range(batch_size)], device=self.device, dtype=torch.float)
+        target_scores = target_scores / seq_lengths
+        negative_scores = negative_scores / seq_lengths
         
         # Pairwise hinge loss
         ranking_loss = F.relu(self.ranking_margin - (target_scores - negative_scores)).mean()
         
         return ranking_loss
+    
+    def _generate_hard_negative(self, log_probs, target_seq, beam_width=3):
+        """
+        Generate hard negative sample using beam search.
+        Returns the score of the best sequence that differs from target.
+        """
+        seq_length, vocab_size = log_probs.shape
+        
+        # Beam search with early stopping
+        # Each beam item: (sequence, score, completed)
+        beams = [([], 0.0)]
+        
+        for pos in range(seq_length):
+            new_beams = []
+            
+            for seq, score in beams:
+                # Get top-k candidates for this position
+                position_log_probs = log_probs[pos]
+                top_k_values, top_k_indices = torch.topk(position_log_probs, k=min(beam_width, vocab_size))
+                
+                for value, idx in zip(top_k_values, top_k_indices):
+                    new_seq = seq + [idx.item()]
+                    new_score = score + value.item()
+                    new_beams.append((new_seq, new_score))
+            
+            # Keep only top beam_width sequences
+            new_beams.sort(key=lambda x: x[1], reverse=True)
+            beams = new_beams[:beam_width]
+        
+        # Find the best sequence that differs from target
+        target_list = target_seq.cpu().tolist()
+        
+        for seq, score in beams:
+            if seq != target_list:
+                return torch.tensor(score, device=self.device)
+        
+        # Fallback: if all beams match target (very unlikely), 
+        # create a simple negative by flipping one character
+        fallback_score = self._create_fallback_negative(log_probs, target_seq)
+        return fallback_score
+    
+    def _create_fallback_negative(self, log_probs, target_seq):
+        """
+        Fallback method: create negative by taking second-best at random position.
+        This is better than the original method because it only changes one position.
+        """
+        seq_length = len(target_seq)
+        
+        # Pick a random position to flip
+        flip_pos = torch.randint(0, seq_length, (1,)).item()
+        
+        # Get second-best character at that position
+        position_log_probs = log_probs[flip_pos]
+        top_2_values, top_2_indices = torch.topk(position_log_probs, k=2)
+        
+        # Calculate score with the flip
+        negative_score = 0.0
+        for i in range(seq_length):
+            if i == flip_pos:
+                # Use second-best at flip position
+                negative_score += top_2_values[1].item()
+            else:
+                # Use target character at other positions
+                target_char_idx = target_seq[i]
+                negative_score += log_probs[i, target_char_idx].item()
+        
+        return torch.tensor(negative_score, device=self.device)
     
     def _calculate_accuracy(self, outputs, targets, lengths):
         """Calculate accuracy"""
@@ -652,6 +756,48 @@ class ContextAwareFinetuner:
                 print(f"Saved new best model: {model_path}")
         
         return best_val_acc
+    
+    def _generate_linguistic_negative(self, target_text, char_to_idx, idx_to_char):
+        """
+        Generate linguistically meaningful negative samples by:
+        1. Swapping accents within the same vowel group
+        2. Removing accents from random positions  
+        3. Adding wrong accents to unaccented vowels
+        """
+        if not target_text:
+            return target_text
+            
+        text_chars = list(target_text)
+        
+        # Choose corruption strategy
+        strategy = torch.randint(0, 3, (1,)).item()
+        
+        if strategy == 0:  # Swap accents within vowel groups
+            for i, char in enumerate(text_chars):
+                for base, group in self.accent_groups.items():
+                    if char in group and len(group) > 1:
+                        if torch.rand(1).item() < 0.3:  # 30% chance to swap
+                            # Choose different accent from same group
+                            other_accents = [c for c in group if c != char]
+                            if other_accents:
+                                text_chars[i] = random.choice(other_accents)
+                            
+        elif strategy == 1:  # Remove accents (Vietnamese -> no accents)
+            for i, char in enumerate(text_chars):
+                if torch.rand(1).item() < 0.2:  # 20% chance to remove accent
+                    text_chars[i] = remove_accents(char)
+                    
+        else:  # Add wrong accents to unaccented vowels
+            base_vowels = ['a', 'e', 'i', 'o', 'u', 'y']
+            for i, char in enumerate(text_chars):
+                if char in base_vowels and torch.rand(1).item() < 0.2:
+                    # Add random accent from the same vowel group
+                    if char in self.accent_groups:
+                        accented_options = [c for c in self.accent_groups[char] if c != char]
+                        if accented_options:
+                            text_chars[i] = random.choice(accented_options)
+        
+        return ''.join(text_chars)
 
 def main():
     """Main training function"""
