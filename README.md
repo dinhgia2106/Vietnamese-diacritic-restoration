@@ -1,150 +1,118 @@
-# Vietnamese Accent Restoration - Progressive Training
+# Vietnamese Accent Restoration
 
-Hệ thống training từ đầu cho Vietnamese Accent Restoration model với khả năng checkpoint và resume.
+A deep learning system for restoring Vietnamese diacritics using Acausal Temporal Convolutional Networks (A-TCN).
 
-## Cấu trúc Files
+## Project Structure
 
-- `progressive_trainer.py` - Main training script
-- `training_utils.py` - Utilities để monitor và test
-- `model_architecture.py` - Kiến trúc model
-- `context_aware_tuning.py` - Fine-tuning system (legacy)
+```
+VietnameseAnccentRestore/
+├── model_architecture.py          # Core model definitions (TCN, Enhanced TCN, VietnameseAccentRestorer)
+├── train_model.py                 # Basic training pipeline with simple trainer
+├── context_aware_tuning.py        # Advanced fine-tuning with context-aware ranking
+├── VietnameseAccentRestore.py     # Demo application with interactive modes
+└── data/                          # Training data directory
+    ├── Viet74K_clean.txt         # Main training corpus
+    ├── cleaned_comments.txt      # Additional comments data
+    └── corpus-full.txt           # Full corpus data
+```
 
-## Tính năng chính
+## Components
 
-### Progressive Training
-- Train từ đầu trên toàn bộ corpus_splitted
-- Mỗi file JSON được treat như một training sample
-- Chia train/val/test cho từng sample
-- Lưu checkpoint sau mỗi sample
+### 1. Model Architecture (`model_architecture.py`)
 
-### Resume Capability
-- Tự động lưu trạng thái training
-- Có thể resume từ bất kỳ điểm nào
-- Lưu best model dựa trên validation loss
+- **VietnameseAccentRestorer**: Main wrapper class for the model
+- **ACausalTCN**: Basic Temporal Convolutional Network
+- **EnhancedACausalTCN**: Advanced TCN with multi-head attention
+- **Supporting layers**: PositionalEncoding, MultiHeadAttention, TCNBlock
 
-### Monitoring System
-- Log chi tiết cho mỗi bước training
-- Test model trong quá trình training
-- Vẽ training curves
-- Backup và cleanup utilities
+### 2. Training Pipeline (`train_model.py`)
 
-## Cách sử dụng
+- **AccentRestorationTrainer**: Simple trainer for basic training
+- **AccentDataset**: Dataset class for loading training pairs
+- **load_viet74k_data()**: Data loading utility
+- Features: Early stopping, learning rate scheduling, gradient clipping
 
-### 1. Bắt đầu training từ đầu
+### 3. Context-Aware Fine-tuning (`context_aware_tuning.py`)
+
+- **ContextAwareFinetuner**: Advanced trainer with ranking loss
+- **StreamingDataset**: Efficient dataset for large files
+- **ContextAwareRanker**: Context-aware prediction ranking
+- Features: Ranking loss, context dictionary, streaming data processing
+
+### 4. Demo Application (`VietnameseAccentRestore.py`)
+
+- **VietnameseAccentDemo**: Interactive demo with multiple modes
+- Supports word dictionary lookup
+- Context-aware ranking integration
+- Performance benchmarking
+
+## Usage
+
+### Basic Training
 
 ```bash
-python progressive_trainer.py
+python train_model.py
 ```
 
-### 2. Monitor quá trình training
+This will train a basic model using Viet74K data.
 
-Kiểm tra trạng thái:
+### Context-Aware Fine-tuning
+
 ```bash
-python training_utils.py status
+python context_aware_tuning.py
 ```
 
-Test model hiện tại:
+This requires a pre-trained base model and additional corpus data.
+
+### Demo Application
+
 ```bash
-python training_utils.py test
+python VietnameseAccentRestore.py
 ```
 
-Vẽ training curves:
-```bash
-python training_utils.py plot
-```
+Interactive demo with multiple modes:
 
-### 3. Resume training
+1. Batch testing
+2. Context-aware ranking
+3. Word dictionary lookup
+4. Interactive modes
+5. Performance benchmarking
 
-Nếu training bị dừng, resume từ checkpoint:
-```bash
-python training_utils.py resume
-```
+## Data Requirements
 
-### 4. Utilities khác
+- **Viet74K_clean.txt**: Main training corpus (Vietnamese text with diacritics)
+- **cleaned_comments.txt**: Additional training data (optional)
+- **corpus-full.txt**: Full corpus for fine-tuning (optional)
 
-Backup model:
-```bash
-python training_utils.py backup
-```
+## Model Features
 
-Dọn dẹp checkpoints cũ:
-```bash
-python training_utils.py clean
-```
+- Character-level sequence-to-sequence prediction
+- Temporal convolutions with dilated kernels
+- Multi-head self-attention (Enhanced model)
+- Context-aware prediction ranking
+- Support for multiple prediction suggestions
 
-## Cấu trúc thư mục output
+## Training Features
 
-```
-models/progressive/
-├── best_model.pth              # Model tốt nhất
-├── final_model.pth             # Model cuối cùng
-├── vocabulary.json             # Character vocabulary
-├── training_state.json         # Trạng thái training
-├── training_curves.png         # Đồ thị training
-├── checkpoints/
-│   └── latest_checkpoint.pth   # Checkpoint mới nhất
-└── logs/
-    └── training_*.log          # Log files
-```
+- Automatic train/validation split
+- Early stopping with patience
+- Learning rate scheduling
+- Gradient clipping
+- Mixed training with ranking loss
+- Streaming data processing for large datasets
 
-## Training State
+## Requirements
 
-File `training_state.json` chứa:
-- `current_sample_idx`: Sample hiện tại đang train
-- `total_samples`: Tổng số samples
-- `global_step`: Số bước training tổng cộng
-- `best_val_loss`: Validation loss tốt nhất
-- `train_losses`: Lịch sử train loss
-- `val_losses`: Lịch sử validation loss
-- `start_time`: Thời gian bắt đầu training
+- torch
+- numpy
+- tqdm
+- sklearn
+- unidecode
+- unicodedata
 
-## Model Configuration
+## Model Outputs
 
-Mặc định sử dụng Enhanced model với:
-- `embedding_dim`: 256
-- `hidden_dim`: 512
-- `num_layers`: 8
-- `dropout`: 0.15
-
-Có thể thay đổi trong `progressive_trainer.py`:
-```python
-trainer = ProgressiveTrainer(
-    model_type="enhanced",  # hoặc "standard"
-    embedding_dim=256,
-    hidden_dim=512,
-    num_layers=8,
-    dropout=0.15
-)
-```
-
-## Xử lý lỗi
-
-### Nếu training bị crash:
-1. Kiểm tra log files trong `models/progressive/logs/`
-2. Chạy `python training_utils.py status` để xem trạng thái
-3. Resume training với `python training_utils.py resume`
-
-### Nếu hết memory:
-1. Giảm `batch_size` trong `train_on_sample()` function
-2. Hoặc sử dụng model "standard" thay vì "enhanced"
-
-### Nếu muốn train lại từ đầu:
-1. Xóa thư mục `models/progressive/`
-2. Chạy `python progressive_trainer.py`
-
-## Performance Monitoring
-
-Model sẽ được test với các câu mẫu:
-- "toi di hoc"
-- "hom nay troi dep"
-- "ban co khoe khong"
-- ...
-
-Xem kết quả với `python training_utils.py test`
-
-## Disk Space Management
-
-- Mỗi checkpoint ~100-500MB tùy model size
-- Log files tăng dần theo thời gian
-- Sử dụng `clean` command để dọn dẹp định kỳ
-- Backup model quan trọng với `backup` command 
+- **models/best_model.pth**: Best trained model
+- **models/context_aware_best_model.pth**: Fine-tuned model
+- **models/context_ranker.json**: Context ranking data
+- **models/word_dictionary.json**: Word dictionary (if available)
