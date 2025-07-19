@@ -10,3 +10,5 @@ __pycache__
 *.pyzw
 *.pyz
 /models
+/temp_phobert_accent_model
+/vietnamese_accent_restorer
