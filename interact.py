@@ -1,6 +1,8 @@
 import torch
 import pickle
 import os
+import time
+from datetime import datetime
 
 # Import lớp PhoverAccentRestorer từ file phoBERT.py của bạn
 from phoBERT import PhobertAccentRestorer 
@@ -57,11 +59,28 @@ def interactive_session():
             if not user_input.strip():
                 continue
 
-            # Thực hiện dự đoán
-            restored_sentence = restorer.predict(user_input)
+            # Log thời gian bắt đầu
+            start_time = time.time()
+            current_time = datetime.now().strftime("%H:%M:%S")
+            print(f"[{current_time}] Bắt đầu xử lý...")
+
+            # Thực hiện prediction với intelligent ranking (mô hình tự quyết định số lượng)
+            suggestions = restorer.predict_with_adaptive_ranking(user_input.strip())
             
-            # In kết quả
-            print(f"Kết quả: {restored_sentence}")
+            print(f"Input: {user_input.strip()}")
+            if len(suggestions) == 1:
+                print(f"Kết quả: {suggestions[0][0]} (độ tin cậy: {suggestions[0][1]:.3f})")
+            else:
+                print(f"Các gợi ý (được xếp hạng thông minh):")
+                for i, (suggestion, score) in enumerate(suggestions, 1):
+                    print(f"  {i}. {suggestion} (điểm: {score:.3f})")
+            
+            # Log thời gian kết thúc và tính toán thời gian chạy
+            end_time = time.time()
+            execution_time = end_time - start_time
+            end_current_time = datetime.now().strftime("%H:%M:%S")
+            
+            print(f"[{end_current_time}] Hoàn thành trong {execution_time:.3f} giây")
 
         except KeyboardInterrupt:
             print("\nĐã nhận tín hiệu thoát. Tạm biệt!")
